@@ -6,17 +6,6 @@
 #include <cmath>
 
 namespace icp {
-
-/**
- * Point-to-Point ICP configuration.
- */
-struct ICPConfig {
-    int max_iterations = 50;
-    double tolerance = 1e-6;      // Convergence threshold for error change
-    double min_error = 1e-9;      // Stop if error falls below this
-};
-
-
 /**
  * Point-to-Point ICP registration.
  * 
@@ -42,7 +31,10 @@ inline ICPResult icp_point_to_point(
     Matrix current_source = source.points();
 
     // Accumulated transformation (source -> target)
-    Transformation total_transform = Transformation::identity();
+    Transformation total_transform = config.initial_transform;
+
+    current_source = (current_source * total_transform.R().transpose()).rowwise() 
+                    + total_transform.t().transpose();
 
     ICPResult result;
     double prev_error = std::numeric_limits<double>::infinity();

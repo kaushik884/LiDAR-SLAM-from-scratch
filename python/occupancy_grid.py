@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
+script_dir = "/home/kaushik/Coding/LiDAR-ICP-Algorithm-from-scratch/python/odometry_results"
 
 # Load occupancy grid
 grid_path = os.path.join(script_dir, "occupancy_grid.csv")

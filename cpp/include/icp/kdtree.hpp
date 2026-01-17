@@ -52,7 +52,32 @@ public:
         search_nearest(root_.get(), query, 0, best_idx, best_dist_sq);
         return {best_idx, best_dist_sq};
     }
+    /**
+     * Find k nearest neighbors for a query point.
+     * Returns vector of (index, squared_distance) pairs, sorted by distance.
+     */
+    std::vector<std::pair<int, double>> k_nearest(const Vector3& query, int k) const {
+        if (!root_ || k <= 0) return {};
 
+        // Max-heap: keeps track of k closest points
+        // We use max-heap so we can quickly reject points farther than current worst
+        std::priority_queue<std::pair<double, int>> heap;  // (dist_sq, index)
+        
+        search_k_nearest(root_.get(), query, k, heap);
+
+        // Convert heap to sorted vector
+        std::vector<std::pair<int, double>> results;
+        results.reserve(heap.size());
+        while (!heap.empty()) {
+            auto [dist_sq, idx] = heap.top();
+            heap.pop();
+            results.push_back({idx, dist_sq});
+        }
+        
+        // Reverse to get closest first
+        std::reverse(results.begin(), results.end());
+        return results;
+    }
     /**
      * Find nearest neighbors for multiple query points.
      * Returns vectors of (indices, squared_distances).
@@ -119,7 +144,44 @@ private:
 
         return node;
     }
+    /**
+     * Recursive k-nearest neighbor search.
+     */
+    void search_k_nearest(
+        const Node* node,
+        const Vector3& query,
+        int k,
+        std::priority_queue<std::pair<double, int>>& heap
+    ) const {
+        if (!node) return;
 
+        // Check current node
+        const Vector3& p = points_[node->point_idx];
+        double dist_sq = (p - query).squaredNorm();
+
+        if (heap.size() < static_cast<size_t>(k)) {
+            heap.push({dist_sq, node->point_idx});
+        } else if (dist_sq < heap.top().first) {
+            heap.pop();
+            heap.push({dist_sq, node->point_idx});
+        }
+
+        // Determine which subtree to search first
+        int dim = node->split_dim;
+        double diff = query(dim) - p(dim);
+        
+        Node* first = (diff < 0) ? node->left.get() : node->right.get();
+        Node* second = (diff < 0) ? node->right.get() : node->left.get();
+
+        // Search near subtree first
+        search_k_nearest(first, query, k, heap);
+
+        // Check if we need to search far subtree
+        // Only if heap isn't full OR splitting plane is closer than current worst
+        if (heap.size() < static_cast<size_t>(k) || diff * diff < heap.top().first) {
+            search_k_nearest(second, query, k, heap);
+        }
+    }
     /**
      * Recursive nearest neighbor search.
      */
@@ -184,6 +246,29 @@ public:
         distances.resize(n);
 
         std::vector<int> indices;
+        std::vector<double> distances_sq;
+        tree_.nearest_batch(source_points, indices, distances_sq);
+
+        for (int i = 0; i < n; ++i) {
+            target_matched.row(i) = target_points_.row(indices[i]);
+            distances(i) = std::sqrt(distances_sq[i]);
+        }
+    }
+    /**
+     * Find correspondences and return indices.
+     * Returns matched target points, their indices, and distances.
+     */
+    void find_correspondences_with_indices(
+        const Matrix& source_points,
+        Matrix& target_matched,
+        std::vector<int>& indices,
+        Eigen::VectorXd& distances
+    ) const {
+        const int n = source_points.rows();
+        target_matched.resize(n, 3);
+        distances.resize(n);
+        indices.resize(n);
+
         std::vector<double> distances_sq;
         tree_.nearest_batch(source_points, indices, distances_sq);
 

@@ -14,7 +14,9 @@
 #include <unordered_set>
 #include <set>
 
-#include "icp_p2p/icp.hpp"
+#include "icp.hpp"
+#include "pose_graph.hpp"
+#include "icp/loop_closure.hpp"
 
 namespace fs = std::filesystem;
 
@@ -24,7 +26,7 @@ namespace {
  * Configuration for LiDAR odometry.
  */
 struct OdometryConfig {
-    double voxel_size = 0.2;        // Downsampling voxel size (meters)
+    double voxel_size = 0.5;        // Downsampling voxel size (meters)
     int max_iterations = 50;         // ICP max iterations
     double tolerance = 1e-6;         // ICP convergence tolerance
     int min_points = 1000;           // Minimum points after downsampling
@@ -239,7 +241,7 @@ Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> voxel_downsample(
  * Extract timestamp from filename like "PC_3159677985.ply"
  */
 long long extract_timestamp(const std::string& filename) {
-    std::regex pattern(R"(PC_(\d+)\.ply)");
+    std::regex pattern(R"((\d+)\.ply)");
     std::smatch match;
     if (std::regex_search(filename, match, pattern)) {
         return std::stoll(match[1].str());
@@ -425,25 +427,35 @@ void run_odometry(
     std::cout << "Build occupancy map: " << (build_map ? "yes" : "no") << "\n";
     std::cout << "Processing...\n\n";
 
-    // Initialize
+    // Initialize loop closure detector
+    icp::LoopClosureConfig lc_config;
+    lc_config.frame_gap = 50;
+    lc_config.sc_distance_threshold = 0.15;
+    lc_config.icp_fitness_threshold = 0.15;
+    icp::LoopClosureDetector loop_detector(lc_config);
+
+    // Storage
     std::vector<Eigen::Vector3d> positions;
     std::vector<icp::Transformation> poses;
     std::vector<Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>> raw_clouds;
+    std::vector<Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>> downsampled_clouds;
     
     positions.push_back(Eigen::Vector3d::Zero());
     poses.push_back(icp::Transformation::identity());
 
+    // Initialize pose graph
+    icp::PoseGraph pose_graph;
+    pose_graph.addPrior(0, icp::Transformation::identity());
+
     // Load first frame
     auto prev_points_raw = load_ply(frames[0].second);
     
-    // Debug: print point cloud statistics
     std::cout << "First frame statistics:\n";
     std::cout << "  Raw points: " << prev_points_raw.rows() << "\n";
     std::cout << "  X range: [" << prev_points_raw.col(0).minCoeff() << ", " << prev_points_raw.col(0).maxCoeff() << "]\n";
     std::cout << "  Y range: [" << prev_points_raw.col(1).minCoeff() << ", " << prev_points_raw.col(1).maxCoeff() << "]\n";
     std::cout << "  Z range: [" << prev_points_raw.col(2).minCoeff() << ", " << prev_points_raw.col(2).maxCoeff() << "]\n";
     
-    // Store raw cloud for occupancy grid
     if (build_map) {
         raw_clouds.push_back(prev_points_raw);
     }
@@ -451,15 +463,19 @@ void run_odometry(
     auto prev_points = voxel_downsample(prev_points_raw, config.voxel_size);
     std::cout << "  After downsampling: " << prev_points.rows() << " points\n\n";
 
+    // Add first frame to loop closure detector
+    downsampled_clouds.push_back(prev_points);
+    loop_detector.addFrame(prev_points, 0);
+
     // Process frames
     double total_time = 0;
     int failed_frames = 0;
+    int total_loop_closures = 0;
 
     for (int i = 1; i < n_frames; ++i) {
         // Load current frame
         auto curr_points_raw = load_ply(frames[i].second);
         
-        // Store raw cloud for occupancy grid
         if (build_map) {
             raw_clouds.push_back(curr_points_raw);
         }
@@ -469,9 +485,10 @@ void run_odometry(
         if (curr_points.rows() < config.min_points) {
             std::cout << "Frame " << i << ": Skipped (only " << curr_points.rows() << " points)\n";
             failed_frames++;
-            // Still add identity transform to keep indices aligned
             poses.push_back(poses.back());
             positions.push_back(positions.back());
+            downsampled_clouds.push_back(curr_points);
+            loop_detector.addFrame(curr_points, i);
             prev_points = curr_points;
             continue;
         }
@@ -487,7 +504,7 @@ void run_odometry(
         icp_config.max_iterations = config.max_iterations;
         icp_config.tolerance = config.tolerance;
         
-        icp::ICPResult result = icp::icp_point_to_point(source, target, icp_config);
+        icp::ICPResult result = icp::icp_point_to_plane(source, target, icp_config);
         
         auto end = std::chrono::high_resolution_clock::now();
         double elapsed = std::chrono::duration<double, std::milli>(end - start).count();
@@ -508,6 +525,35 @@ void run_odometry(
         poses.push_back(new_pose);
         positions.push_back(new_pose.t());
 
+        // Add odometry factor to pose graph
+        pose_graph.addOdometryFactor(
+            poses.size() - 2,
+            poses.size() - 1,
+            delta_transform.inverse(),
+            result.final_error
+        );
+
+        // Store cloud and add to loop closure detector
+        // downsampled_clouds.push_back(curr_points);
+        // loop_detector.addFrame(curr_points, i);
+
+        // // Detect loop closures
+        // auto loop_closures = loop_detector.detect();
+        
+        // for (const auto& lc : loop_closures) {
+        //     std::cout << "  Loop closure: frame " << lc.query_frame 
+        //               << " -> frame " << lc.match_frame
+        //               << " (SC: " << std::fixed << std::setprecision(3) << lc.scan_context_distance 
+        //               << ", ICP: " << lc.icp_fitness << ")\n";
+            
+        //     pose_graph.addLoopClosureEdge(
+        //         lc.match_frame,
+        //         lc.query_frame,
+        //         lc.transform
+        //     );
+        //     total_loop_closures++;
+        // }
+
         // Update previous frame
         prev_points = curr_points;
 
@@ -521,6 +567,30 @@ void run_odometry(
         }
     }
 
+    // Summary before optimization
+    std::cout << "\n=== Loop Closure Summary ===\n";
+    std::cout << "Total loop closures detected: " << total_loop_closures << "\n";
+
+    // Add skip connections and optimize
+    std::cout << "\nOptimizing pose graph...\n";
+    pose_graph.addSkipConnections(downsampled_clouds, 2);
+
+    if (pose_graph.optimize()) {
+        std::cout << "  Optimization converged in " << pose_graph.getIterations() << " iterations\n";
+        std::cout << "  Final error: " << pose_graph.getFinalError() << "\n";
+        
+        std::vector<icp::Transformation> optimized_poses = pose_graph.getAllPoses();
+        poses = optimized_poses;
+        
+        positions.clear();
+        for (const auto& pose : poses) {
+            positions.push_back(pose.t());
+        }
+        
+        std::cout << "  Replaced " << poses.size() << " poses with optimized versions\n";
+    } else {
+        std::cout << "  Optimization failed, using raw odometry poses\n";
+    }
     // Summary
     std::cout << "\n";
     std::cout << "============================================================\n";
@@ -578,7 +648,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string data_dir = argv[1];
-    std::string output_dir = data_dir + "/odometry_results";
+    std::string output_dir = "/home/kaushik/Coding/LiDAR-ICP-Algorithm-from-scratch/python/odometry_results";
     OdometryConfig config;
     OccupancyGridConfig grid_config;
     int max_frames = -1;

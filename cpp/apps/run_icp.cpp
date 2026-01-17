@@ -7,7 +7,7 @@
 #include <cmath>
 #include <iomanip>
 
-#include "icp_p2p/icp.hpp"
+#include "icp.hpp"
 
 namespace {
 

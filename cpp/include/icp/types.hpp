@@ -5,7 +5,6 @@
 #include <stdexcept>
 
 namespace icp {
-
 /**
  * Point cloud represented as Nx3 Eigen matrix.
  * Each row is a point [x, y, z].
@@ -140,5 +139,13 @@ struct ICPResult {
     // Helper to check success
     bool success() const { return converged && final_error < 0.01; }
 };
-
+/**
+ * Point-to-Point ICP configuration.
+ */
+struct ICPConfig {
+    int max_iterations = 50;
+    double tolerance = 1e-6;      // Convergence threshold for error change
+    double min_error = 1e-9;      // Stop if error falls below this
+    Transformation initial_transform = Transformation::identity();
+};
 } // namespace icp
