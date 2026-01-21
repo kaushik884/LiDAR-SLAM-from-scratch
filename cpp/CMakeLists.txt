@@ -14,10 +14,6 @@ target_include_directories(icp_lib PUBLIC
 )
 target_link_libraries(icp_lib PUBLIC Eigen3::Eigen ${GTSAM_LIBRARY} tbb)
 
-# Main executable
-add_executable(run_icp apps/run_icp.cpp)
-target_link_libraries(run_icp PRIVATE icp_lib)
-
 # LiDAR odometry executable
 add_executable(lidar_odometry apps/lidar_odometry.cpp)
 target_link_libraries(lidar_odometry PRIVATE icp_lib)
