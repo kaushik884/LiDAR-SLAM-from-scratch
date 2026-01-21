@@ -12,7 +12,7 @@ target_include_directories(icp_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${GTSAM_INCLUDE_DIR}
 )
-target_link_libraries(icp_lib PUBLIC Eigen3::Eigen ${GTSAM_LIBRARY})
+target_link_libraries(icp_lib PUBLIC Eigen3::Eigen ${GTSAM_LIBRARY} tbb)
 
 # Main executable
 add_executable(run_icp apps/run_icp.cpp)

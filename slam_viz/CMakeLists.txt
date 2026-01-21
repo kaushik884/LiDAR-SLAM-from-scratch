@@ -29,7 +29,7 @@ target_include_directories(icp_lib PUBLIC
     ${LIDAR_PROJECT_DIR}/cpp/include
     ${GTSAM_INCLUDE_DIR}
 )
-target_link_libraries(icp_lib PUBLIC Eigen3::Eigen ${GTSAM_LIBRARY})
+target_link_libraries(icp_lib PUBLIC Eigen3::Eigen ${GTSAM_LIBRARY} tbb)
 
 # SLAM visualization node
 add_executable(slam_node
@@ -53,14 +53,14 @@ install(TARGETS slam_node
     DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install launch files
-install(DIRECTORY launch/
-    DESTINATION share/${PROJECT_NAME}/launch
-)
+# # Install launch files
+# install(DIRECTORY launch/
+#     DESTINATION share/${PROJECT_NAME}/launch
+# )
 
-# Install rviz config
-install(DIRECTORY rviz/
-    DESTINATION share/${PROJECT_NAME}/rviz
-)
+# # Install rviz config
+# install(DIRECTORY rviz/
+#     DESTINATION share/${PROJECT_NAME}/rviz
+# )
 
 ament_package()

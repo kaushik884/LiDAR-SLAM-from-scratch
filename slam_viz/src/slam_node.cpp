@@ -267,6 +267,17 @@ SlamNode::SlamNode() : Node("slam_node"), current_frame_idx_(0), processing_comp
     timer_ = this->create_wall_timer(
         std::chrono::milliseconds(period_ms),
         std::bind(&SlamNode::timer_callback, this));
+    
+    icp::LoopClosureConfig lc_config;
+    lc_config.frame_gap = 50;              // Don't look for loops within 50 frames
+    lc_config.sc_distance_threshold = 0.2; // Scan context similarity threshold
+    lc_config.icp_fitness_threshold = 0.3; // ICP verification threshold
+    lc_config.max_candidates = 3;          // Check top 3 candidates per frame
+
+    loop_detector_ = icp::LoopClosureDetector(lc_config);
+
+    RCLCPP_INFO(this->get_logger(), "Loop closure detection enabled (frame_gap=%d)", 
+        lc_config.frame_gap);
 
     RCLCPP_INFO(this->get_logger(), "SLAM node ready, starting processing...");
 }
@@ -306,15 +317,18 @@ void SlamNode::timer_callback() {
         // Run final optimization
         RCLCPP_INFO(this->get_logger(), "Running final pose graph optimization...");
         run_pose_graph_optimization();
+
+        build_final_global_map();
         return;
     }
 
     process_frame(current_frame_idx_);
     current_frame_idx_++;
 
-    // Periodic optimization
-    if (current_frame_idx_ % config_.optimization_interval == 0) {
+    // Only optimize if loop closure was detected
+    if (has_loop_closure_pending_) {
         run_pose_graph_optimization();
+        has_loop_closure_pending_ = false;
     }
 }
 
@@ -375,11 +389,10 @@ void SlamNode::process_frame(int frame_idx) {
     Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> curr_world = 
         (curr_points * new_pose.R().transpose()).rowwise() + new_pose.t().transpose();
     
-    // Append to global map
-    Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> new_global_map(
-        global_map_points_.rows() + curr_world.rows(), 3);
-    new_global_map << global_map_points_, curr_world;
-    global_map_points_ = new_global_map;
+    recent_clouds_world_.push_back(curr_world);
+    if (recent_clouds_world_.size() > MAX_RECENT_CLOUDS) {
+        recent_clouds_world_.erase(recent_clouds_world_.begin());
+    }
 
     // Update previous points
     prev_points_ = curr_points;
@@ -392,59 +405,126 @@ void SlamNode::process_frame(int frame_idx) {
     publish_current_scan(curr_world);
     if(current_frame_idx_ % 5 == 0){
         publish_global_map();
-        publish_occupancy_grid();
     }
     publish_trajectory();
     publish_current_pose();
 
+    // Add frame to loop closure detector (use downsampled cloud)
+    loop_detector_.addFrame(curr_points, frame_idx);
+
+    // Check for loop closures every 10 frames (not every frame, for efficiency)
+    if (frame_idx % 10 == 0 && frame_idx > config_.optimization_interval) {
+        auto loop_closures = loop_detector_.detect();
+        
+        for (const auto& lc : loop_closures) {
+            RCLCPP_INFO(this->get_logger(), 
+                "Loop closure detected! Frame %d <-> Frame %d (SC dist=%.3f, ICP err=%.4f)",
+                lc.query_frame, lc.match_frame, 
+                lc.scan_context_distance, lc.icp_fitness);
+            
+            // Add loop closure constraint to pose graph
+            pose_graph_.addLoopClosure(
+                lc.match_frame,  // from (older frame)
+                lc.query_frame,  // to (current frame)  
+                lc.transform     // relative transform from ICP
+            );
+            
+            loop_closures_found_++;
+            has_loop_closure_pending_ = true;
+        }
+    }
     if (frame_idx % 10 == 0) {
-        RCLCPP_INFO(this->get_logger(), 
-            "Frame %d/%zu: %ld pts, error=%.2e, iters=%d, time=%.1fms, map=%ld pts",
-            frame_idx, frames_.size() - 1, curr_points.rows(), 
-            result.final_error, result.num_iterations, elapsed_ms,
-            global_map_points_.rows());
+    RCLCPP_INFO(this->get_logger(), 
+        "Frame %d/%zu: %ld pts, error=%.2e, iters=%d, time=%.1fms, loops=%d",
+        frame_idx, frames_.size() - 1, curr_points.rows(), 
+        result.final_error, result.num_iterations, elapsed_ms, loop_closures_found_);
     }
 }
-
 
 void SlamNode::run_pose_graph_optimization() {
     RCLCPP_INFO(this->get_logger(), "Running pose graph optimization...");
     
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
     if (pose_graph_.optimize()) {
-        RCLCPP_INFO(this->get_logger(), "Optimization converged, error: %.2f", 
-            pose_graph_.getFinalError());
+        auto opt_time = std::chrono::high_resolution_clock::now();
+        double opt_ms = std::chrono::duration<double, std::milli>(opt_time - start_time).count();
         
-        // Update poses
+        RCLCPP_INFO(this->get_logger(), "Optimization converged in %.1fms, error: %.2f", 
+            opt_ms, pose_graph_.getFinalError());
+        
+        // Update poses from optimizer
         std::vector<icp::Transformation> optimized_poses = pose_graph_.getAllPoses();
         poses_ = optimized_poses;
         
-        // Update positions
+        // Update positions cache
         positions_.clear();
         for (const auto& pose : poses_) {
             positions_.push_back(pose.t());
         }
         
-        // Rebuild global map with optimized poses
-        global_map_points_.resize(0, 3);
-        for (size_t i = 0; i < downsampled_clouds_.size() && i < poses_.size(); ++i) {
-            // auto downsampled = voxel_downsample(raw_clouds_[i], config_.voxel_size);
-            Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> cloud_world = 
-                (downsampled_clouds_[i] * poses_[i].R().transpose()).rowwise() + poses_[i].t().transpose();
-            
-            Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> new_global_map(
-                global_map_points_.rows() + cloud_world.rows(), 3);
-            new_global_map << global_map_points_, cloud_world;
-            global_map_points_ = new_global_map;
-        }
-        rebuild_occupancy_grid();
+        // Rebuild sliding window with corrected poses
+        rebuild_recent_clouds();
         
-        RCLCPP_INFO(this->get_logger(), "Rebuilt global map with %ld points", 
-            global_map_points_.rows());
+        // Note: We do NOT rebuild the full global map here
+        // That happens only at the end via build_final_global_map()
+        
     } else {
         RCLCPP_WARN(this->get_logger(), "Optimization failed");
     }
 }
 
+void SlamNode::rebuild_recent_clouds() {
+    recent_clouds_world_.clear();
+    
+    // Only rebuild the last N clouds with corrected poses
+    size_t start_idx = 0;
+    if (downsampled_clouds_.size() > MAX_RECENT_CLOUDS) {
+        start_idx = downsampled_clouds_.size() - MAX_RECENT_CLOUDS;
+    }
+    
+    for (size_t i = start_idx; i < downsampled_clouds_.size() && i < poses_.size(); ++i) {
+        Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> cloud_world = 
+            (downsampled_clouds_[i] * poses_[i].R().transpose()).rowwise() + poses_[i].t().transpose();
+        recent_clouds_world_.push_back(cloud_world);
+    }
+}
+
+void SlamNode::build_final_global_map() {
+    RCLCPP_INFO(this->get_logger(), "Building final global map...");
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+    // Calculate total points needed
+    size_t total_points = 0;
+    for (const auto& cloud : downsampled_clouds_) {
+        total_points += cloud.rows();
+    }
+    
+    // Pre-allocate
+    global_map_points_.resize(total_points, 3);
+    
+    // Transform and copy each cloud
+    size_t current_row = 0;
+    for (size_t i = 0; i < downsampled_clouds_.size() && i < poses_.size(); ++i) {
+        const auto& cloud = downsampled_clouds_[i];
+        const auto& pose = poses_[i];
+        
+        // Transform to world frame and copy directly into global map
+        for (int j = 0; j < cloud.rows(); ++j) {
+            Eigen::Vector3d pt_world = pose.R() * cloud.row(j).transpose() + pose.t();
+            global_map_points_.row(current_row++) = pt_world.transpose();
+        }
+    }
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    
+    RCLCPP_INFO(this->get_logger(), "Global map built: %ld points in %.1fms", 
+        global_map_points_.rows(), elapsed_ms);
+    
+    // Also rebuild occupancy grid
+    rebuild_occupancy_grid();
+}
 
 void SlamNode::publish_current_scan(
     const Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>& cloud) {
@@ -454,10 +534,31 @@ void SlamNode::publish_current_scan(
 
 
 void SlamNode::publish_global_map() {
-    // Downsample global map for visualization to reduce bandwidth
-    auto downsampled = voxel_downsample(global_map_points_, config_.voxel_size * 2);
-    auto msg = eigen_to_pointcloud2(downsampled, "map");
-    global_map_pub_->publish(msg);
+    if (processing_complete_) {
+        // After completion, publish the full map
+        auto downsampled = voxel_downsample(global_map_points_, config_.voxel_size * 2);
+        auto msg = eigen_to_pointcloud2(downsampled, "map");
+        global_map_pub_->publish(msg);
+    } else {
+        // During SLAM, only publish recent clouds (sliding window)
+        if (recent_clouds_world_.empty()) return;
+        
+        // Concatenate recent clouds for visualization
+        size_t total_points = 0;
+        for (const auto& cloud : recent_clouds_world_) {
+            total_points += cloud.rows();
+        }
+        
+        Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor> recent_map(total_points, 3);
+        size_t current_row = 0;
+        for (const auto& cloud : recent_clouds_world_) {
+            recent_map.middleRows(current_row, cloud.rows()) = cloud;
+            current_row += cloud.rows();
+        }
+        
+        auto msg = eigen_to_pointcloud2(recent_map, "map");
+        global_map_pub_->publish(msg);
+    }
 }
 
 

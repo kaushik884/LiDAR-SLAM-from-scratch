@@ -14,6 +14,7 @@
 
 #include "icp.hpp"
 #include "pose_graph.hpp"
+#include "icp/loop_closure.hpp"
 
 namespace slam_viz {
 
@@ -93,7 +94,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr trajectory_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr current_pose_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
+    icp::LoopClosureDetector loop_detector_;
+    int loop_closures_found_ = 0;
     // Configuration
     SlamConfig config_;
     std::string data_dir_;
@@ -128,7 +130,13 @@ private:
         const Eigen::Vector3d& sensor_position);
     void rebuild_occupancy_grid();
     void publish_occupancy_grid();
+    void rebuild_recent_clouds();
+    void build_final_global_map();
     nav_msgs::msg::OccupancyGrid cells_to_occupancy_grid_msg();
+    // Add to private members:
+    bool has_loop_closure_pending_ = false;  // Flag to trigger optimization
+    std::vector<Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>> recent_clouds_world_;  // Sliding window for viz
+    static constexpr size_t MAX_RECENT_CLOUDS = 20;  // How many recent scans to show
 };
 
 }  // namespace slam_viz
