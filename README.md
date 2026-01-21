@@ -15,29 +15,29 @@ A complete LiDAR SLAM (Simultaneous Localization and Mapping) system built from 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         FRONTEND                                 │
+│                         FRONTEND                                │
 ├─────────────────────────────────────────────────────────────────┤
 │  Point Cloud ──→ Downsample ──→ Point-to-Plane ICP ──→ Odometry │
-│                                        │                         │
-│                               Scan Context Descriptor            │
-│                                        │                         │
-│                          Loop Closure Detection                  │
-│                         (Ring Key + ICP Verification)            │
+│                                        │                        │
+│                               Scan Context Descriptor           │
+│                                        │                        │
+│                          Loop Closure Detection                 │
+│                         (Ring Key + ICP Verification)           │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                         BACKEND                                  │
+│                         BACKEND                                 │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
+│                                                                 │
 │    Odometry Factors ──→ Pose Graph ←── Loop Closure Factors     │
-│                             │                                    │
-│                      GTSAM Optimizer                             │
-│                             │                                    │
-│                      Optimized Poses                             │
-│                             │                                    │
-│                   Global Map & Trajectory                        │
-│                                                                  │
+│                             │                                   │
+│                      GTSAM Optimizer                            │
+│                             │                                   │
+│                      Optimized Poses                            │
+│                             │                                   │
+│                   Global Map & Trajectory                       │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
