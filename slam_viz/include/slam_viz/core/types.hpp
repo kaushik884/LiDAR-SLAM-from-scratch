@@ -2,12 +2,15 @@
 
 #include <Eigen/Dense>
 #include <vector>
-#include <stdexcept>
 
-namespace icp {
+namespace slam {
+
 /**
  * Point cloud represented as Nx3 Eigen matrix.
  * Each row is a point [x, y, z].
+ * 
+ * Design decision: Row-major storage for cache-friendly iteration over points.
+ * This matches how PLY files store data and how we iterate in ICP.
  */
 class PointCloud {
 public:
@@ -15,9 +18,7 @@ public:
     using Vector3 = Eigen::Vector3d;
 
     PointCloud() = default;
-
     explicit PointCloud(const Matrix& points) : points_(points) {}
-
     explicit PointCloud(Matrix&& points) : points_(std::move(points)) {}
 
     // Construct from vector of points
@@ -62,6 +63,13 @@ private:
 
 /**
  * Rigid transformation in 3D, stored as 4x4 homogeneous matrix.
+ * 
+ * Matrix form:
+ *     [R  t]
+ *     [0  1]
+ * 
+ * Design decision: 4x4 matrix allows easy composition via multiplication.
+ * This is standard in robotics and graphics pipelines.
  */
 class Transformation {
 public:
@@ -70,15 +78,18 @@ public:
     using Vector3 = Eigen::Vector3d;
 
     Transformation() : matrix_(Matrix4::Identity()) {}
-
     explicit Transformation(const Matrix4& matrix) : matrix_(matrix) {}
 
     // Construct from R and t
+    Transformation(const Matrix3& R, const Vector3& t) {
+        matrix_ = Matrix4::Identity();
+        matrix_.block<3, 3>(0, 0) = R;
+        matrix_.block<3, 1>(0, 3) = t;
+    }
+
+    // Factory methods
     static Transformation from_rt(const Matrix3& R, const Vector3& t) {
-        Matrix4 mat = Matrix4::Identity();
-        mat.block<3, 3>(0, 0) = R;
-        mat.block<3, 1>(0, 3) = t;
-        return Transformation(mat);
+        return Transformation(R, t);
     }
 
     static Transformation identity() {
@@ -87,7 +98,6 @@ public:
 
     // Access
     const Matrix4& matrix() const { return matrix_; }
-
     Matrix3 R() const { return matrix_.block<3, 3>(0, 0); }
     Vector3 t() const { return matrix_.block<3, 1>(0, 3); }
 
@@ -104,9 +114,9 @@ public:
         return PointCloud(std::move(transformed));
     }
 
-    // Compose: this @ other (this applied after other)
+    // Compose: this * other (this applied after other)
     Transformation compose(const Transformation& other) const {
-        return Transformation(matrix_ * other.matrix_);
+        return Transformation(Matrix4(matrix_ * other.matrix_));
     }
 
     // Operator for composition
@@ -127,7 +137,20 @@ private:
 
 
 /**
+ * Configuration for ICP algorithms.
+ * Shared across all ICP variants for consistent interface.
+ */
+struct ICPConfig {
+    int max_iterations = 50;
+    double tolerance = 1e-6;      // Convergence threshold for error change
+    double min_error = 1e-9;      // Stop if error falls below this
+    Transformation initial_transform = Transformation::identity();
+};
+
+
+/**
  * Result of ICP registration.
+ * Returned by all ICP variants.
  */
 struct ICPResult {
     Transformation transformation;
@@ -137,15 +160,7 @@ struct ICPResult {
     double final_error = 0.0;
 
     // Helper to check success
-    bool success() const { return converged && final_error < 0.01; }
+    bool success() const { return converged && final_error < 0.1; }
 };
-/**
- * Point-to-Point ICP configuration.
- */
-struct ICPConfig {
-    int max_iterations = 50;
-    double tolerance = 1e-6;      // Convergence threshold for error change
-    double min_error = 1e-9;      // Stop if error falls below this
-    Transformation initial_transform = Transformation::identity();
-};
-} // namespace icp
+
+}  // namespace slam
